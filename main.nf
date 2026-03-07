@@ -6,20 +6,22 @@ log.info """\
     ============================================
           DNASeq Pipeline Configuration
     ============================================
-    platform        : ${params.platform}
-    samplesheet     : ${params.samplesheet}
-    genome          : ${params.genome_file}
-    genome index    : ${params.genome_index_files}
-    index genome    : ${params.index_genome}
-    qsr truth vcfs  : ${params.qsrVcfs}
-    output directory: ${params.outdir}
-    fastqc          : ${params.fastqc}
-    aligner         : ${params.aligner}
-    variant caller  : ${params.variant_caller}
-    bqsr            : ${params.bqsr}
-    degraded_dna    : ${params.degraded_dna}
+    platform             : ${params.platform}
+    samplesheet          : ${params.samplesheet}
+    genome               : ${params.genome_file}
+    bwa index            : ${params.bwa_index_files}
+    minimap2 index       : ${params.minimap2_index_file}
+    gatk reference       : ${params.gatk_reference_files}
+    index genome         : ${params.index_genome}
+    qsr truth vcfs       : ${params.qsrVcfs}
+    output directory     : ${params.outdir}
+    fastqc               : ${params.fastqc}
+    aligner              : ${params.aligner}
+    variant caller       : ${params.variant_caller}
+    bqsr                 : ${params.bqsr}
+    degraded_dna         : ${params.degraded_dna}
     variant_recalibration: ${params.variant_recalibration}
-    identity_analysis: ${params.identity_analysis}
+    identity_analysis    : ${params.identity_analysis}
     ============================================
 """.stripIndent()
 
@@ -29,6 +31,9 @@ if (params.index_genome) {
 }
 if (params.fastqc) {
     include { FASTQC } from './modules/FASTQC'
+}
+if (params.fastp) {
+    include { fastpReads } from './modules/fastp'
 }
 include { sortBam } from './modules/sortBam'
 include { markDuplicates } from './modules/markDuplicates'
@@ -48,10 +53,16 @@ if (params.identity_analysis) {
 }
 if (params.aligner == 'bwa-mem') {
     include { alignReadsBwaMem } from './modules/alignReadsBwaMem'
-} else if (params.aligner == 'bwa-aln') {
+}
+else if (params.aligner == 'bwa-aln') {
     include { alignReadsBwaAln } from './modules/alignReadsBwaAln'
-} else {
-    error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem' or 'bwa-aln'."
+}
+else if (params.aligner == 'minimap2') {
+    include { minimap2Align } from './modules/alignReadsMiniMap2'
+    include { indexGenomeMinimap2 } from './modules/indexGenomeMinimap2'
+}
+else {
+    error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem', 'bwa-aln', or 'minimap2'."
 }
 if (params.variant_caller == 'haplotype-caller') {
     include { haplotypeCaller } from './modules/haplotypeCaller'
@@ -65,15 +76,6 @@ if (params.degraded_dna) {
 }
 
 workflow {
-
-    // User decides to index genome or not
-    if (params.index_genome){
-        // Flatten as is of format [fasta, [rest of files..]]
-        indexed_genome_ch = indexGenome(params.genome_file).flatten()
-    }
-    else {
-        indexed_genome_ch = Channel.fromPath(params.genome_index_files)
-    }
 
     // Create qsrc_vcf_ch channel
     qsrc_vcf_ch = Channel.fromPath(params.qsrVcfs)
@@ -98,137 +100,218 @@ workflow {
         FASTQC(read_pairs_ch)
     }
 
-    // Align reads to the indexed genome
-    if (params.aligner == 'bwa-mem') {
-        align_ch = alignReadsBwaMem(read_pairs_ch, indexed_genome_ch.collect())
-    } else if (params.aligner == 'bwa-aln') {
-        align_ch = alignReadsBwaAln(read_pairs_ch, indexed_genome_ch.collect())
+    // Preprocess reads with fastp if enabled
+    if (params.fastp) {
+        preprocessed_reads_ch = fastpReads(read_pairs_ch)
+            .map { sample_id, r1, r2, html, json ->
+                tuple(sample_id, [r1, r2])
+            }
+    } else {
+        preprocessed_reads_ch = read_pairs_ch
     }
+
+    /*
+     * ALIGNMENT SECTION
+     * All branches must define:
+     *   - align_ch               : tuple(sample_id, bam, bai)
+     *   - reference_genome_ch    : all FASTA + BWA/standard index files, used by downstream GATK tools
+     */
+
+    if (params.aligner == 'bwa-mem') {
+
+        if (params.index_genome) {
+            reference_genome_ch = indexGenome(params.genome_file).flatten().collect()
+        } else {
+            reference_genome_ch = Channel.fromPath(params.bwa_index_files).collect()
+        }
+
+        align_ch = alignReadsBwaMem(
+            preprocessed_reads_ch,
+            reference_genome_ch
+        )
+
+    } else if (params.aligner == 'bwa-aln') {
+
+        if (params.index_genome) {
+            reference_genome_ch = indexGenome(params.genome_file).flatten().collect()
+        } else {
+            reference_genome_ch = Channel.fromPath(params.bwa_index_files).collect()
+        }
+
+        align_ch = alignReadsBwaAln(
+            preprocessed_reads_ch,
+            reference_genome_ch
+        )
+
+    } else if (params.aligner == 'minimap2') {
+
+        /*
+         * minimap2 index (.mmi) — used only for alignment
+         * This is kept separate from reference_genome_ch because GATK tools
+         * cannot use a .mmi file and need the standard FASTA + .fai + .dict instead.
+         */
+        if (params.index_genome) {
+            // Build the .mmi index from scratch
+            minimap2_index_ch = indexGenomeMinimap2(params.genome_file)
+        } else {
+            // Expect params.minimap2_index_file to point to a single .mmi file,
+            // and params.genome_file to point to the FASTA (needed alongside it)
+            if (!params.minimap2_index_file) {
+                error "When aligner='minimap2' and index_genome=false, you must provide params.minimap2_index_file"
+            }
+            minimap2_index_ch = Channel.of(
+                tuple(
+                    file(params.genome_file),
+                    file(params.minimap2_index_file)
+                )
+            )
+        }
+
+        align_ch = minimap2Align(
+            preprocessed_reads_ch,
+            minimap2_index_ch
+        )
+
+        /*
+         * reference_genome_ch — FASTA + standard indices for all downstream GATK tools
+         * This is the same pattern as the bwa branches and must include:
+         *   - the FASTA file
+         *   - FASTA index (.fai)
+         *   - sequence dictionary (.dict)
+         * Point params.genome_index_files at a glob covering all three, e.g.:
+         *   genome_index_files = "/path/to/ref/genome.{fa,fa.fai,dict}"
+         */
+        if (params.index_genome) {
+            // indexGenome produces BWA indices but also .fai and .dict which GATK needs
+            reference_genome_ch = indexGenome(params.genome_file).flatten().collect()
+        } else {
+            if (!params.gatk_reference_files) {
+                error "When aligner='minimap2' and index_genome=false, you must provide params.gatk_reference_files pointing to your FASTA + .fai + .dict files"
+}
+reference_genome_ch = Channel.fromPath(params.gatk_reference_files).collect()
+    }
+}
+
+    /*
+     * POST-ALIGNMENT PROCESSING
+     */
 
     // Sort BAM files
     sort_ch = sortBam(align_ch)
 
-    // Mark duplicates in BAM files
+    // Mark duplicates
     mark_ch = markDuplicates(sort_ch)
 
-    // Index the BAM files and collect the output channel
+    // Index BAM files
     indexed_bam_ch = indexBam(mark_ch)
 
-    // Conditionally run mapDamage if degraded_dna parameter is set
+    // Conditionally run mapDamage if degraded_dna is set
     if (params.degraded_dna) {
-        // Run mapDamage2 process only if degraded_dna is true
-        pre_mapDamage_ch = mapDamage2(indexed_bam_ch, indexed_genome_ch.collect())
+        pre_mapDamage_ch = mapDamage2(indexed_bam_ch, reference_genome_ch)
         mapDamage_ch = indexMapDamageBam(pre_mapDamage_ch)
     } else {
-        // If degraded_dna is not true, just pass through the sorted BAM files
         mapDamage_ch = indexed_bam_ch
     }
 
-    // Create a channel from qsrVcfs
+    // Create known sites channel for BQSR
     knownSites_ch = Channel.fromPath(params.qsrVcfs)
         .filter { file -> file.getName().endsWith('.vcf.gz.tbi') || file.getName().endsWith('.vcf.idx') }
         .map { file -> "--known-sites " + file.getBaseName() }
         .collect()
 
+    // Conditionally run BQSR
     if (params.bqsr) {
-        // Run BQSR on indexed BAM files
-        bqsr_ch = baseRecalibrator(mapDamage_ch, knownSites_ch, indexed_genome_ch.collect(), qsrc_vcf_ch.collect())
-
+        bqsr_ch = baseRecalibrator(mapDamage_ch, knownSites_ch, reference_genome_ch, qsrc_vcf_ch.collect())
     } else {
-        // If BQSR is skipped, just pass through the mapDamage_ch channel
         bqsr_ch = mapDamage_ch
     }
 
-    // Run HaplotypeCaller on BQSR files
+    /*
+     * VARIANT CALLING
+     */
+
     if (params.variant_caller == "haplotype-caller") {
-        gvcf_ch = haplotypeCaller(bqsr_ch, indexed_genome_ch.collect()).collect()
+        gvcf_ch = haplotypeCaller(bqsr_ch, reference_genome_ch).collect()
     }
 
-    // Now we map to create separate lists for sample IDs, VCF files, and index files
+    // Collate per-sample GVCFs into grouped lists
     all_gvcf_ch = gvcf_ch
         .collect { listOfTuples ->
-            def sample_ids = listOfTuples.collate(3).collect { it[0] }   // Collect sample IDs from every 3rd element
-            def vcf_files = listOfTuples.collate(3).collect { it[1] }    // Collect VCF files
-            def vcf_index_files = listOfTuples.collate(3).collect { it[2] } // Collect VCF index files
+            def sample_ids      = listOfTuples.collate(3).collect { it[0] }
+            def vcf_files       = listOfTuples.collate(3).collect { it[1] }
+            def vcf_index_files = listOfTuples.collate(3).collect { it[2] }
             return tuple(sample_ids, vcf_files, vcf_index_files)
         }
 
-    // Combine GVCFs
-    combined_gvcf_ch = combineGVCFs(all_gvcf_ch, indexed_genome_ch.collect())
+    // Combine and genotype GVCFs
+    combined_gvcf_ch = combineGVCFs(all_gvcf_ch, reference_genome_ch)
+    final_vcf_ch     = genotypeGVCFs(combined_gvcf_ch, reference_genome_ch)
 
-    // Run GenotypeGVCFs
-    final_vcf_ch = genotypeGVCFs(combined_gvcf_ch, indexed_genome_ch.collect())
+    /*
+     * VARIANT FILTERING / RECALIBRATION
+     */
 
-    // Conditionally apply variant recalibration or filtering
     if (params.variant_recalibration) {
-        // Define a map of VCF files to resource options
+
         def resourceOptions = [
-            'Homo_sapiens_assembly38.known_indels': 'known=true,training=false,truth=false,prior=15.0',  // High-priority known indels, not used for training
-            'hapmap_3.3.hg38': 'known=false,training=false,truth=true,prior=15.0',  // Good for truth, not training
-            '1000G_omni2.5.hg38': 'known=false,training=true,truth=false,prior=12.0',  // Omni SNPs, used for training
-            '1000G_phase1.snps.high_confidence.hg38': 'known=true,training=true,truth=true,prior=10.0',  // High confidence SNPs, both for training and truth
-            'Homo_sapiens_assembly38.dbsnp138': 'known=true,training=false,truth=false,prior=2.0',  // dbSNP, known but not for training
-            'Mills_and_1000G_gold_standard.indels.hg38': 'known=true,training=true,truth=true,prior=12.0'  // Gold standard indels, good for truth (indels)
+            'Homo_sapiens_assembly38.known_indels'                  : 'known=true,training=false,truth=false,prior=15.0',
+            'hapmap_3.3.hg38'                                       : 'known=false,training=false,truth=true,prior=15.0',
+            '1000G_omni2.5.hg38'                                    : 'known=false,training=true,truth=false,prior=12.0',
+            '1000G_phase1.snps.high_confidence.hg38'                : 'known=true,training=true,truth=true,prior=10.0',
+            'Homo_sapiens_assembly38.dbsnp138'                      : 'known=true,training=false,truth=false,prior=2.0',
+            'Mills_and_1000G_gold_standard.indels.hg38'             : 'known=true,training=true,truth=true,prior=12.0'
         ]
 
-        // Generate --resource arguments
         knownSitesArgs_ch = Channel
             .fromPath(params.qsrVcfs)
             .filter { file -> file.getName().endsWith('.vcf.gz') || file.getName().endsWith('.vcf') }
             .map { file ->
-                def baseName = file.getName().replaceAll(/\.vcf(\.gz)?$/, '') // Remove .vcf.gz or .vcf
-                def resourceArgs = resourceOptions.get(baseName) ?: "" // Get attributes from resourceOptions
-                return "--resource:${baseName},${resourceArgs} ${file.getName()}" // Only the filename, no full path
+                def baseName     = file.getName().replaceAll(/\.vcf(\.gz)?$/, '')
+                def resourceArgs = resourceOptions.get(baseName) ?: ""
+                return "--resource:${baseName},${resourceArgs} ${file.getName()}"
             }
             .collect()
-        filtered_vcf_ch = variantRecalibrator(final_vcf_ch, knownSitesArgs_ch, indexed_genome_ch.collect(), qsrc_vcf_ch.collect())
+
+        filtered_vcf_ch = variantRecalibrator(final_vcf_ch, knownSitesArgs_ch, reference_genome_ch, qsrc_vcf_ch.collect())
+
     } else {
-        filtered_vcf_ch = filterVCF(final_vcf_ch, indexed_genome_ch.collect())
+        filtered_vcf_ch = filterVCF(final_vcf_ch, reference_genome_ch)
     }
 
-    // Conditionally run identityAnalysis if identity_analysis is true
+    /*
+     * IDENTITY ANALYSIS
+     */
+
     if (params.identity_analysis) {
 
-        //Create psam_info_ch and collect the sample ID and sex info into a single channel
         psam_info_ch = Channel
             .fromPath(params.samplesheet)
             .splitCsv(sep: '\t')
             .map { row ->
                 if (row.size() == 4) {
-                    tuple(row[0], row[3])  // Sample ID and sex info when 4 columns are present
+                    tuple(row[0], row[3])
                 } else if (row.size() == 3) {
-                    tuple(row[0], row[2])    // Sample ID and null for sex info when 3 columns are present
+                    tuple(row[0], row[2])
                 } else {
-                    error "Unexpected row format in samplesheet: $row"  // Handle unexpected formats
+                    error "Unexpected row format in samplesheet: $row"
                 }
             }
 
-
-        // Initialize a variable to hold the combined PSAM content, starting with the header
         def combined_psam_content = new StringBuilder("#IID\tSID\tPAT\tMAT\tSEX\n")
 
-        // Create a channel that processes sample information and appends it to the combined PSAM content
         psam_file_ch = psam_info_ch.map { sample_info ->
             def sample_id = sample_info[0]
-            def sex = sample_info[1]
-
-            // Convert empty sex values to 'NA' for unknown
-            if (!sex) { sex = "NA" }
-
-            // Generate PSAM content for this sample and strip any newlines before appending
+            def sex       = sample_info[1] ?: "NA"
             def sample_line = "${sample_id}\t${sample_id}\t0\t0\t${sex}".stripIndent().trim()
             combined_psam_content.append(sample_line + "\n")
         }
 
-        // Save the combined content to a single .psam file and return the file path through the channel
         psam_file_ch.subscribe {
             def combined_psam_file = new File("/tmp/combined_samples.psam")
             combined_psam_file.text = combined_psam_content.toString()
-
-            // Pass the file itself to the channel
             return combined_psam_file
         }
-        // Now pass the psam_info_ch to the identityAnalysis process
+
         identity_analysis_ch = identityAnalysis(filtered_vcf_ch, psam_file_ch)
     }
 }
@@ -252,6 +335,55 @@ workflow FASTQC_only {
     if (params.fastqc) {
         FASTQC(read_pairs_ch)
     }
+}
+
+workflow fastp_only {
+
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            if (row.size() == 4) {
+                tuple(row[0], [row[1], row[2]])
+            } else if (row.size() == 3) {
+                tuple(row[0], [row[1]])
+            } else {
+                error "Unexpected row format in samplesheet: $row"
+            }
+        }
+
+    fastpReads(read_pairs_ch)
+}
+workflow minimap2_only {
+
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            if (row.size() == 4) {
+                tuple(row[0], [row[1], row[2]])
+            } else if (row.size() == 3) {
+                tuple(row[0], [row[1]])
+            } else {
+                error "Unexpected row format in samplesheet: $row"
+            }
+        }
+
+    if (params.index_genome) {
+        minimap2_index_ch = indexGenomeMinimap2(params.genome_file)
+    } else {
+        if (!params.minimap2_index_file) {
+            error "When aligner='minimap2' and index_genome=false, you must provide params.minimap2_index_file"
+        }
+        minimap2_index_ch = Channel.of(
+            tuple(
+                file(params.genome_file),
+                file(params.minimap2_index_file)
+            )
+        )
+    }
+
+    minimap2Align(read_pairs_ch, minimap2_index_ch)
 }
 
 workflow.onComplete {
