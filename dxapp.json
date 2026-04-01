@@ -1,0 +1,117 @@
+{
+  "name": "dnaseq_pipeline",
+  "title": "DNASeq Pipeline",
+  "version": "1.0.0",
+  "description": "Nextflow DNA sequencing pipeline (BWA/Minimap2 + GATK)",
+  "inputSpec": {
+    "samplesheet": {
+      "class": "file",
+      "optional": false,
+      "label": "Samplesheet TSV",
+      "help": "Tab-separated file listing sample IDs and read file paths"
+    },
+    "genome_file": {
+      "class": "file",
+      "optional": false,
+      "label": "Reference Genome FASTA"
+    },
+    "bwa_index_files": {
+      "class": "array:file",
+      "optional": true,
+      "label": "BWA Index Files",
+      "help": "Required if using BWA aligner and index_genome=false"
+    },
+    "minimap2_index_file": {
+      "class": "file",
+      "optional": true,
+      "label": "Minimap2 .mmi Index",
+      "help": "Required if using minimap2 and index_genome=false"
+    },
+    "gatk_reference_files": {
+      "class": "array:file",
+      "optional": true,
+      "label": "GATK Reference Files",
+      "help": "FASTA + .fai + .dict for downstream GATK"
+    },
+    "qsrVcfs": {
+      "class": "array:file",
+      "optional": true,
+      "label": "Known VCF Files (truth sites)"
+    },
+    "aligner": {
+      "class": "string",
+      "optional": true,
+      "default": "bwa-mem",
+      "enum": ["bwa-mem","bwa-aln","minimap2"]
+    },
+    "variant_caller": {
+      "class": "string",
+      "optional": true,
+      "default": "haplotype-caller",
+      "enum": ["haplotype-caller"]
+    },
+    "index_genome": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "fastqc": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "fastp": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "bqsr": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "variant_recalibration": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "degraded_dna": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "identity_analysis": {
+      "class": "boolean",
+      "optional": true,
+      "default": false
+    },
+    "outdir": {
+      "class": "string",
+      "optional": true,
+      "default": "results",
+      "label": "Output Directory"
+    }
+  },
+  "outputSpec": {
+    "vcf": {
+      "class": "array:file",
+      "pattern": "${outdir}/*.vcf*",
+      "label": "Final VCF files"
+    },
+    "bam": {
+      "class": "array:file",
+      "pattern": "${outdir}/*.bam*",
+      "label": "Final BAM files"
+    },
+    "reports": {
+      "class": "array:file",
+      "pattern": "${outdir}/nextflow_reports/*",
+      "label": "Nextflow reports (timeline, DAG, execution trace)"
+    }
+  },
+  "runSpec": {
+    "interpreter": "bash",
+    "file": "run_nextflow.sh"
+  },
+  "dxapi": "1.0.0"
+}
