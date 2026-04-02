@@ -58,7 +58,7 @@
                     "type": "boolean",
                     "description": "Run fastp for read trimming and quality filtering",
                     "default": false
-                }
+                },
                 "index_genome": {
                     "type": "boolean",
                     "description": "Index the genome if not already done",
@@ -99,10 +99,7 @@
                 "fastqc",
                 "variant_recalibration",
                 "identity_analysis",
-                "degraded_dna",
-                "max_memory",
-                "max_time",
-                "max_cpus"
+                "degraded_dna"
             ]
         }
     },
