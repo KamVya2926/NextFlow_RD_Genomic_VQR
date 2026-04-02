@@ -93,7 +93,6 @@
                 "genome_file",
                 "qsrVcfs",
                 "outdir",
-                "fastp",
                 "aligner",
                 "bqsr",
                 "fastqc",
