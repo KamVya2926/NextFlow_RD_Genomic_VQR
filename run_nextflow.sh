@@ -1,56 +1,98 @@
 #!/bin/bash
 set -euo pipefail
 
+echo "=== DEBUG: Listing inputs ==="
+env | sort | grep -E 'sample|genome|bwa|minimap|gatk|qsr' || true
+echo "============================"
+
 # -----------------------------
-# DNAnexus inputs (environment variables)
+# Validate required inputs
 # -----------------------------
-# DNAnexus automatically stages inputs and sets paths
+if [[ -z "${samplesheet:-}" ]]; then
+    echo "ERROR: samplesheet is not set"
+    exit 1
+fi
 
-NEXTFLOW_CMD="nextflow run main.nf -profile docker"
+if [[ -z "${genome_file:-}" ]]; then
+    echo "ERROR: genome_file is not set"
+    exit 1
+fi
 
-# Required inputs
-NEXTFLOW_CMD+=" --samplesheet $SAMPLESHEET"
-NEXTFLOW_CMD+=" --genome_file $GENOME_FILE"
+echo "Samplesheet: $samplesheet"
+echo "Genome: $genome_file"
 
-# Optional file arrays
-if [[ -n "${BWA_INDEX_FILES+x}" ]]; then
-    for f in "${BWA_INDEX_FILES[@]}"; do
-        NEXTFLOW_CMD+=" --bwa_index_files $f"
+echo "=== Files in working dir ==="
+ls -lh
+echo "============================"
+
+# -----------------------------
+# Build Nextflow command SAFELY
+# -----------------------------
+cmd=(nextflow run main.nf -profile docker)
+
+# Required
+cmd+=(--samplesheet "$samplesheet")
+cmd+=(--genome_file "$genome_file")
+
+# -----------------------------
+# Optional arrays
+# -----------------------------
+
+# IMPORTANT: DNAnexus may pass arrays as space-separated strings
+# So we normalize them
+
+if [[ -n "${bwa_index_files:-}" ]]; then
+    echo "Using BWA index files: $bwa_index_files"
+    for f in $bwa_index_files; do
+        cmd+=(--bwa_index_files "$f")
     done
 fi
 
-if [[ -n "${MINIMAP2_INDEX_FILE+x}" ]]; then
-    NEXTFLOW_CMD+=" --minimap2_index_file $MINIMAP2_INDEX_FILE"
-fi
-
-if [[ -n "${GATK_REFERENCE_FILES+x}" ]]; then
-    for f in "${GATK_REFERENCE_FILES[@]}"; do
-        NEXTFLOW_CMD+=" --gatk_reference_files $f"
+if [[ -n "${gatk_reference_files:-}" ]]; then
+    echo "Using GATK reference files: $gatk_reference_files"
+    for f in $gatk_reference_files; do
+        cmd+=(--gatk_reference_files "$f")
     done
 fi
 
-if [[ -n "${QSRVCFS+x}" ]]; then
-    for f in "${QSRVCFS[@]}"; do
-        NEXTFLOW_CMD+=" --qsrVcfs $f"
+if [[ -n "${qsrVcfs:-}" ]]; then
+    echo "Using QSR VCFs: $qsrVcfs"
+    for f in $qsrVcfs; do
+        cmd+=(--qsrVcfs "$f")
     done
 fi
 
-# Boolean options
-[[ "${INDEX_GENOME:-false}" == "true" ]] && NEXTFLOW_CMD+=" --index_genome"
-[[ "${FASTQC:-false}" == "true" ]] && NEXTFLOW_CMD+=" --fastqc"
-[[ "${FASTP:-false}" == "true" ]] && NEXTFLOW_CMD+=" --fastp"
-[[ "${BQS:-false}" == "true" ]] && NEXTFLOW_CMD+=" --bqsr"
-[[ "${VARIANT_RECALIBRATION:-false}" == "true" ]] && NEXTFLOW_CMD+=" --variant_recalibration"
-[[ "${DEGRADED_DNA:-false}" == "true" ]] && NEXTFLOW_CMD+=" --degraded_dna"
-[[ "${IDENTITY_ANALYSIS:-false}" == "true" ]] && NEXTFLOW_CMD+=" --identity_analysis"
-
-# Other string parameters
-[[ -n "${ALIGNER:-}" ]] && NEXTFLOW_CMD+=" --aligner $ALIGNER"
-[[ -n "${VARIANT_CALLER:-}" ]] && NEXTFLOW_CMD+=" --variant_caller $VARIANT_CALLER"
-[[ -n "${OUTDIR:-}" ]] && NEXTFLOW_CMD+=" --outdir $OUTDIR"
+# -----------------------------
+# Optional single files
+# -----------------------------
+if [[ -n "${minimap2_index_file:-}" ]]; then
+    cmd+=(--minimap2_index_file "$minimap2_index_file")
+fi
 
 # -----------------------------
-# Run Nextflow
+# Booleans
 # -----------------------------
-echo "Running: $NEXTFLOW_CMD"
-eval $NEXTFLOW_CMD
+[[ "${index_genome:-false}" == "true" ]] && cmd+=(--index_genome)
+[[ "${fastqc:-false}" == "true" ]] && cmd+=(--fastqc)
+[[ "${fastp:-false}" == "true" ]] && cmd+=(--fastp)
+[[ "${bqsr:-false}" == "true" ]] && cmd+=(--bqsr)
+[[ "${variant_recalibration:-false}" == "true" ]] && cmd+=(--variant_recalibration)
+[[ "${degraded_dna:-false}" == "true" ]] && cmd+=(--degraded_dna)
+[[ "${identity_analysis:-false}" == "true" ]] && cmd+=(--identity_analysis)
+
+# -----------------------------
+# Strings
+# -----------------------------
+[[ -n "${aligner:-}" ]] && cmd+=(--aligner "$aligner")
+[[ -n "${variant_caller:-}" ]] && cmd+=(--variant_caller "$variant_caller")
+[[ -n "${outdir:-}" ]] && cmd+=(--outdir "$outdir")
+
+# -----------------------------
+# Run
+# -----------------------------
+echo "=== Running Nextflow ==="
+printf '%q ' "${cmd[@]}"
+echo
+echo "========================"
+
+"${cmd[@]}"
